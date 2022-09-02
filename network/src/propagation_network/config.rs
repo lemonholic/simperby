@@ -28,6 +28,8 @@ pub struct PropagationNetworkConfig {
     /// The capacity for the message queue that passes messages from other nodes
     /// to its simperby node.
     pub(crate) message_queue_capacity: usize,
+    /// The capacity for the memory queue that stores identifiers of already received messages.
+    pub(crate) memory_queue_capacity: usize,
 }
 
 impl Default for PropagationNetworkConfig {
@@ -43,6 +45,7 @@ impl Default for PropagationNetworkConfig {
             peer_discovery_interval: Duration::from_millis(10000),
             broadcast_interval: Duration::from_millis(10000),
             message_queue_capacity: 100,
+            memory_queue_capacity: 1000,
         }
     }
 }
@@ -81,6 +84,11 @@ impl PropagationNetworkConfig {
 
     pub fn with_message_queue_capacity(&mut self, message_queue_capacity: usize) -> &mut Self {
         self.message_queue_capacity = message_queue_capacity;
+        self
+    }
+
+    pub fn with_memory_queue_capacity(&mut self, memory_queue_capacity: usize) -> &mut Self {
+        self.memory_queue_capacity = memory_queue_capacity;
         self
     }
 
