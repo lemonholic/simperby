@@ -45,6 +45,9 @@ pub struct PropagationNetwork {
 
     /// The network configurations.
     _config: PropagationNetworkConfig,
+
+    /// The set of known peers.
+    _known_peers: KnownPeers,
 }
 
 #[async_trait]
@@ -95,13 +98,19 @@ impl PropagationNetwork {
     pub async fn with_config(
         public_key: PublicKey,
         private_key: PrivateKey,
-        _known_peers: Vec<PublicKey>,
+        known_peers: Vec<PublicKey>,
         bootstrap_points: Vec<SocketAddrV4>,
         _network_id: String,
         config: PropagationNetworkConfig,
     ) -> Result<Self, String> {
         // Convert a simperby keypair into a libp2p keypair.
         let keypair = convert_keypair(&public_key, &private_key)?;
+
+        // Store known peers.
+        let mut known_peers_set = KnownPeers::new();
+        for pubkey in known_peers.into_iter() {
+            known_peers_set.insert(pubkey)?;
+        }
 
         // Create swarm and do a series of jobs with configurable timeouts.
         let mut swarm = Self::create_swarm(keypair).await?;
@@ -130,6 +139,7 @@ impl PropagationNetwork {
             sender,
             _swarm: swarm_mutex,
             _config: config,
+            _known_peers: known_peers_set,
         })
     }
 
