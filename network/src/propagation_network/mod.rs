@@ -2,22 +2,28 @@ mod behaviour;
 mod config;
 
 use crate::common::*;
+use behaviour::Event;
 
 use super::*;
 use async_trait::async_trait;
 use behaviour::Behaviour;
+use bounded_vec_deque::BoundedVecDeque;
 use config::PropagationNetworkConfig;
 use futures::StreamExt;
 use libp2p::{
     core::ConnectedPoint,
+    floodsub::{FloodsubEvent, FloodsubMessage, Topic},
+    identify::IdentifyEvent,
     identity::Keypair,
+    kad::{BootstrapOk, KademliaEvent, QueryResult},
     multiaddr::{Multiaddr, Protocol},
     swarm::{dial_opts::DialOpts, Swarm, SwarmBuilder, SwarmEvent},
     tokio_development_transport, PeerId,
 };
+use rand;
 use simperby_common::crypto::*;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddrV4,
     sync::Arc,
     time::Duration,
@@ -46,16 +52,16 @@ pub struct PropagationNetwork {
     sender: broadcast::Sender<Vec<u8>>,
 
     /// The top-level network interface provided by libp2p.
-    _swarm: Arc<Mutex<Swarm<Behaviour>>>,
+    swarm: Arc<Mutex<Swarm<Behaviour>>>,
 
     /// The network configurations.
-    _config: PropagationNetworkConfig,
+    config: PropagationNetworkConfig,
 
     /// The set of known peers.
     _known_peers: KnownPeers,
 
     /// The information of currently broadcast messages.
-    _broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
+    broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
 }
 
 #[async_trait]
@@ -81,22 +87,50 @@ impl AuthorizedNetwork for PropagationNetwork {
         )
         .await
     }
-    async fn broadcast(&self, _message: &[u8]) -> Result<BroadcastToken, String> {
-        unimplemented!();
+
+    async fn broadcast(&self, message: &[u8]) -> Result<BroadcastToken, String> {
+        let token = rand::random();
+        let task = task::spawn(run_broadcast_task(
+            Arc::clone(&self.swarm),
+            token,
+            message.to_vec(),
+            self.config.broadcast_interval,
+        ));
+        let info = BroadcastMessageInfo {
+            _token: token,
+            _message: message.to_vec(),
+            _relayed_nodes: BTreeSet::new(),
+            task,
+        };
+        self.broadcast_messages_info
+            .lock()
+            .await
+            .insert(token, info);
+        Ok(token)
     }
-    async fn stop_broadcast(&self, _token: BroadcastToken) -> Result<(), String> {
-        unimplemented!();
+
+    async fn stop_broadcast(&self, token: BroadcastToken) -> Result<(), String> {
+        let mut info = self.broadcast_messages_info.lock().await;
+        if let Some(message_info) = info.remove(&token) {
+            message_info.task.abort();
+            Ok(())
+        } else {
+            Err(format!("invalid token: {}", token))
+        }
     }
+
     async fn get_broadcast_status(
         &self,
         _token: BroadcastToken,
     ) -> Result<BroadcastStatus, String> {
         unimplemented!();
     }
+
     async fn create_recv_queue(&self) -> Result<broadcast::Receiver<Vec<u8>>, ()> {
         // pub fn subscribe(&self) -> Receiver<T>
         Ok(self.sender.subscribe())
     }
+
     async fn get_live_list(&self) -> Result<Vec<PublicKey>, ()> {
         unimplemented!();
     }
@@ -133,7 +167,10 @@ impl PropagationNetwork {
 
         let _event_handling_task = task::spawn(run_event_handling_task(
             Arc::clone(&swarm_mutex),
+            sender.clone(),
+            public_key,
             config.lock_release_interval,
+            config.memory_queue_capacity,
         ));
 
         let _peer_discovery_task = task::spawn(run_peer_discovery_task(
@@ -145,10 +182,10 @@ impl PropagationNetwork {
             _event_handling_task,
             _peer_discovery_task,
             sender,
-            _swarm: swarm_mutex,
-            _config: config,
+            swarm: swarm_mutex,
+            config,
             _known_peers: known_peers_set,
-            _broadcast_messages_info: Arc::new(Mutex::new(HashMap::new())),
+            broadcast_messages_info: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -283,20 +320,148 @@ async fn run_peer_discovery_task(
 
 async fn run_event_handling_task(
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
+    sender: broadcast::Sender<Vec<u8>>,
+    pubkey: PublicKey,
     lock_release_interval: Duration,
+    memory_queue_capacity: usize,
 ) {
     // This timer guarantees that the lock for swarm will be released
     // regularly and within a finite time.
     let mut lock_release_timer = time::interval(lock_release_interval);
     lock_release_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+    // Record tokens of already received messages up to `memory_queue_capacity`.
+    // `usize` is the remaining number of resending ACK message, which tells the broadcasting node that we've got the message.
+    let mut token_memory_queue: BoundedVecDeque<(BroadcastToken, usize)> =
+        BoundedVecDeque::new(memory_queue_capacity);
+
+    let local_peer_id = convert_public_key(&pubkey)
+        .expect("failed to convert public key.")
+        .to_peer_id();
+
     loop {
         let mut swarm = swarm.lock().await;
         tokio::select! {
-            _item = swarm.select_next_some() => {
-                // do something with item
+            SwarmEvent::Behaviour(event) = swarm.select_next_some() => match event {
+                // Add the node with which we exchanged the identity to our routing table.
+                    Event::Identify(
+                        IdentifyEvent::Received {
+                            peer_id,
+                            info,
+                        }
+                    ) => {
+                    for addr in info.listen_addrs {
+                        swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                    }
+                },
+                // Got `NetworkMessage` from a remote peer.
+                Event::Floodsub(
+                    FloodsubEvent::Message(
+                        FloodsubMessage {
+                            data,
+                            ..
+                        }
+                    )
+                ) => {
+                    if let Ok(message) = serde_json::from_slice(&data) {
+                        match message {
+                            NetworkMessage::Alive(pubkey) => handle_alive(pubkey),
+                            NetworkMessage::Ack(pubkey, token) => handle_ack(pubkey, token),
+                            NetworkMessage::Message(token, message) => handle_message(
+                                &mut swarm,
+                                sender.clone(),
+                                &mut token_memory_queue,
+                                &pubkey,
+                                token,
+                                message
+                            ),
+                        }
+                    } else {
+                        // Discard any invalid message.
+                    }
+                },
+                Event::Kademlia(
+                    KademliaEvent::OutboundQueryCompleted {
+                        result: QueryResult::Bootstrap(
+                            Ok(BootstrapOk {
+                                peer: bootstrap_target,
+                                ..
+                            })
+                        ),
+                        ..
+                    }
+                ) => {
+                    // k-closest peer discovery has completed.
+                    if bootstrap_target == local_peer_id {
+                        let behaviour = swarm.behaviour_mut();
+                        for key in behaviour.kademlia.get_closest_local_peers(&local_peer_id.into()) {
+                            let peer_id = key.preimage();
+                            behaviour.floodsub.add_node_to_partial_view(peer_id.to_owned());
+                        }
+                    }
+                }
+                _ => (),
             },
             _ = lock_release_timer.tick() => (),
         }
+    }
+}
+
+fn handle_alive(_pubkey: PublicKey) {
+    unimplemented!();
+}
+
+fn handle_ack(_pubkey: PublicKey, _token: BroadcastToken) {
+    unimplemented!();
+}
+
+fn handle_message(
+    _swarm: &mut Swarm<Behaviour>,
+    sender: broadcast::Sender<Vec<u8>>,
+    token_memory_queue: &mut BoundedVecDeque<(BroadcastToken, usize)>,
+    _pubkey: &PublicKey,
+    token: BroadcastToken,
+    message: Vec<u8>,
+) {
+    match token_memory_queue
+        .iter_mut()
+        .find(|(token_, _)| *token_ == token)
+    {
+        // We received this message for the first time.
+        None => {
+            // Todo: Send (broadcast) the ACK message.
+            let resend = 2;
+            token_memory_queue.push_back((token, resend));
+            // Put the message into the receive queue.
+            // An error means there is no receiver, which is possible and acceptable. Just discard the result.
+            let _ = sender.send(message);
+        }
+        // We've already received this message.
+        Some(_) => {
+            // Todo: Resend(broadcast) the ACK message.
+        }
+    }
+}
+
+async fn run_broadcast_task(
+    swarm: Arc<Mutex<Swarm<Behaviour>>>,
+    token: BroadcastToken,
+    message: Vec<u8>,
+    broadcast_interval: Duration,
+) {
+    let message = NetworkMessage::Message(token, message);
+    let serialized = match serde_json::to_vec(&message) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    loop {
+        swarm
+            .lock()
+            .await
+            .behaviour_mut()
+            .floodsub
+            .publish(Topic::new("simperby"), serialized.to_owned());
+        sleep(broadcast_interval).await;
     }
 }
 
@@ -320,13 +485,13 @@ mod test {
     impl PropagationNetwork {
         /// Returns the peers currently in contact.
         async fn get_connected_peers(&self) -> Vec<PeerId> {
-            let swarm = self._swarm.lock().await;
+            let swarm = self.swarm.lock().await;
             swarm.connected_peers().copied().collect()
         }
 
         /// Returns the socketv4 addresses to which the listeners are bound.
         async fn get_listen_addresses(&self) -> Vec<SocketAddrV4> {
-            let swarm = self._swarm.lock().await;
+            let swarm = self.swarm.lock().await;
 
             // Convert `Multiaddr` into `SocketAddrV4`.
             let mut listen_addresses = Vec::new();

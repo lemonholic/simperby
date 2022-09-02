@@ -15,9 +15,10 @@ futures = "0.3"
 log = "0.4"
 simperby-common = { version = "0.0.0", path = "../common" }
 libp2p = { version = "0.46.1", features = ["tcp-tokio", "dns-tokio"], optional = true }
+rand = "0.8.5"
+bounded-vec-deque = "0.1.1"
 
 [dev-dependencies]
-rand = "0.8.5"
 port_scanner = "0.1.5"
 
 [features]

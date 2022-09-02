@@ -4,6 +4,7 @@ use libp2p::{
     identity::{self, ed25519, Keypair},
     PeerId,
 };
+use serde::{Deserialize, Serialize};
 use simperby_common::crypto::*;
 use tokio::task;
 
@@ -27,7 +28,15 @@ pub(crate) struct BroadcastMessageInfo {
     pub(crate) _message: Vec<u8>,
     pub(crate) _relayed_nodes: BTreeSet<PublicKey>,
     /// The background task that regularly broadcasts related message.
-    pub(crate) _task: task::JoinHandle<()>,
+    pub(crate) task: task::JoinHandle<()>,
+}
+
+/// A network message type.
+#[derive(Serialize, Deserialize)]
+pub(crate) enum NetworkMessage {
+    Alive(PublicKey),
+    Ack(PublicKey, BroadcastToken),
+    Message(BroadcastToken, Vec<u8>),
 }
 
 impl KnownPeer {

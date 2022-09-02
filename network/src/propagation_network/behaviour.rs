@@ -1,5 +1,5 @@
 use libp2p::{
-    floodsub::{Floodsub, FloodsubEvent},
+    floodsub::{Floodsub, FloodsubEvent, Topic},
     identify::{Identify, IdentifyConfig, IdentifyEvent},
     identity::PublicKey,
     kad::{store::MemoryStore, Kademlia, KademliaConfig, KademliaEvent},
@@ -37,7 +37,8 @@ impl Behaviour {
         let local_peer_id = local_public_key.to_peer_id();
 
         let identify_config =
-            IdentifyConfig::new("/simperby/identify".to_string(), local_public_key);
+            IdentifyConfig::new("/simperby/identify".to_string(), local_public_key)
+                .with_initial_delay(Duration::ZERO);
 
         // Create a key-value store, which will not be used in this crate, for Kademlia DHT.
         let store = MemoryStore::new(local_peer_id);
@@ -49,10 +50,13 @@ impl Behaviour {
             .set_connection_idle_timeout(Duration::from_secs(30))
             .set_query_timeout(Duration::from_secs(20));
 
+        let mut floodsub = Floodsub::new(local_peer_id);
+        floodsub.subscribe(Topic::new("simperby"));
+
         Self {
             identify: Identify::new(identify_config),
             kademlia: Kademlia::with_config(local_peer_id, store, kademlia_config),
-            floodsub: Floodsub::new(local_peer_id),
+            floodsub,
         }
     }
 }
