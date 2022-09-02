@@ -5,6 +5,9 @@ use libp2p::{
     PeerId,
 };
 use simperby_common::crypto::*;
+use tokio::task;
+
+use crate::BroadcastToken;
 
 /// Stores a mapping between libp2p PeerId and simberby PublicKey.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -16,6 +19,15 @@ pub(crate) struct KnownPeer {
 /// Stores a set of known peers.
 pub(crate) struct KnownPeers {
     peers: BTreeSet<KnownPeer>,
+}
+
+/// A struct for managing broadcast message.
+pub(crate) struct BroadcastMessageInfo {
+    pub(crate) _token: BroadcastToken,
+    pub(crate) _message: Vec<u8>,
+    pub(crate) _relayed_nodes: BTreeSet<PublicKey>,
+    /// The background task that regularly broadcasts related message.
+    pub(crate) _task: task::JoinHandle<()>,
 }
 
 impl KnownPeer {

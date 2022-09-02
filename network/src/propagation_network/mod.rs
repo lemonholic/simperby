@@ -16,7 +16,12 @@ use libp2p::{
     tokio_development_transport, PeerId,
 };
 use simperby_common::crypto::*;
-use std::{collections::HashSet, net::SocketAddrV4, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddrV4,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     sync::{broadcast, Mutex},
     task,
@@ -48,6 +53,9 @@ pub struct PropagationNetwork {
 
     /// The set of known peers.
     _known_peers: KnownPeers,
+
+    /// The information of currently broadcast messages.
+    _broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
 }
 
 #[async_trait]
@@ -140,6 +148,7 @@ impl PropagationNetwork {
             _swarm: swarm_mutex,
             _config: config,
             _known_peers: known_peers_set,
+            _broadcast_messages_info: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
