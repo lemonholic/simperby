@@ -40,6 +40,9 @@ pub struct PropagationNetwork {
 
     /// The top-level network interface provided by libp2p.
     _swarm: Arc<Mutex<Swarm<Behaviour>>>,
+
+    /// The network configurations.
+    _config: PropagationNetworkConfig,
 }
 
 #[async_trait]
@@ -124,6 +127,7 @@ impl PropagationNetwork {
             _peer_discovery_task,
             sender,
             _swarm: swarm_mutex,
+            _config: config,
         })
     }
 
