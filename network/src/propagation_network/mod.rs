@@ -1,6 +1,8 @@
 mod behaviour;
 mod config;
 
+use crate::common::*;
+
 use super::*;
 use async_trait::async_trait;
 use behaviour::Behaviour;
@@ -8,7 +10,7 @@ use config::PropagationNetworkConfig;
 use futures::StreamExt;
 use libp2p::{
     core::ConnectedPoint,
-    identity::{ed25519, Keypair},
+    identity::Keypair,
     multiaddr::{Multiaddr, Protocol},
     swarm::{dial_opts::DialOpts, Swarm, SwarmBuilder, SwarmEvent},
     tokio_development_transport, PeerId,
@@ -99,7 +101,7 @@ impl PropagationNetwork {
         config: PropagationNetworkConfig,
     ) -> Result<Self, String> {
         // Convert a simperby keypair into a libp2p keypair.
-        let keypair = Self::convert_keypair(public_key, private_key)?;
+        let keypair = convert_keypair(&public_key, &private_key)?;
 
         // Create swarm and do a series of jobs with configurable timeouts.
         let mut swarm = Self::create_swarm(keypair).await?;
@@ -129,17 +131,6 @@ impl PropagationNetwork {
             _swarm: swarm_mutex,
             _config: config,
         })
-    }
-
-    /// Converts simperby pub/priv keys into a libp2p keypair.
-    fn convert_keypair(public_key: PublicKey, private_key: PrivateKey) -> Result<Keypair, String> {
-        let mut keypair_bytes = private_key.as_ref().to_vec();
-        keypair_bytes.extend(public_key.as_ref());
-        if let Ok(keypair_inner) = ed25519::Keypair::decode(&mut keypair_bytes) {
-            Ok(Keypair::Ed25519(keypair_inner))
-        } else {
-            Err("invalid public/private keypair was given.".to_string())
-        }
     }
 
     /// Creates a swarm with given keypair.
@@ -428,7 +419,11 @@ mod test {
             let seed: Vec<u8> = (0..16).map(|_| rand::random()).collect();
             let (public_key, private_key) = generate_keypair(seed);
             Self {
-                id: PeerId::from(convert_public_key(&public_key, &private_key)),
+                id: PeerId::from(
+                    convert_keypair(&public_key, &private_key)
+                        .expect("failed to convert keypair")
+                        .public(),
+                ),
                 public_key,
                 private_key,
                 network: None,
@@ -690,20 +685,6 @@ mod test {
                 ))?
                 .id)
         }
-    }
-
-    /// A helper function with type conversion.
-    fn convert_public_key(
-        public_key: &PublicKey,
-        private_key: &PrivateKey,
-    ) -> libp2p::identity::PublicKey {
-        let mut keypair_bytes = private_key.as_ref().to_vec();
-        keypair_bytes.extend(public_key.as_ref());
-        // Todo: Handle returned error.
-        let keypair = Keypair::Ed25519(
-            ed25519::Keypair::decode(&mut keypair_bytes).expect("invalid keypair was given."),
-        );
-        keypair.public()
     }
 
     /// Checks each node's routing table to see whether it has all the peers on the same network.
