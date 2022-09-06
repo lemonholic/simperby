@@ -678,10 +678,10 @@ mod test {
         ) -> Result<Vec<NodeKey>, String> {
             let target_nodes = self.get_nodes_not_in_network();
 
-            for key in &target_nodes {
+            for (i, key) in target_nodes.iter().enumerate() {
                 // Select random nodes and add them to bootstrap points.
                 let mut bootstrap_points = Vec::new();
-                let mut rng = StdRng::from_seed(RNG_SEED);
+                let mut rng = StdRng::from_seed([i as u8; 32]);
                 let bootstrap_nodes = self
                     .get_nodes_in_network()
                     .into_iter()
@@ -739,23 +739,26 @@ mod test {
                 .iter()
                 .map(|key| self.nodes.get(key).unwrap())
                 .collect();
-            let futures = zip(nodes, &listen_addresses).map(|(node, listen_address)| {
-                let mut config = create_testnet_config();
-                config.with_listen_address(listen_address.to_owned());
-                let mut rng = StdRng::from_seed(RNG_SEED);
-                let bootstrap_points = listen_addresses
-                    .iter()
-                    .cloned()
-                    .choose_multiple(&mut rng, max_bootstrap_points);
-                PropagationNetwork::with_config(
-                    node.public_key.clone(),
-                    node.private_key.clone(),
-                    Vec::new(),
-                    bootstrap_points,
-                    "test".to_string(),
-                    config,
-                )
-            });
+            let futures =
+                zip(nodes, &listen_addresses)
+                    .enumerate()
+                    .map(|(i, (node, listen_address))| {
+                        let mut config = create_testnet_config();
+                        config.with_listen_address(listen_address.to_owned());
+                        let mut rng = StdRng::from_seed([i as u8; 32]);
+                        let bootstrap_points = listen_addresses
+                            .iter()
+                            .cloned()
+                            .choose_multiple(&mut rng, max_bootstrap_points);
+                        PropagationNetwork::with_config(
+                            node.public_key.clone(),
+                            node.private_key.clone(),
+                            Vec::new(),
+                            bootstrap_points,
+                            "test".to_string(),
+                            config,
+                        )
+                    });
             let networks = join_all(futures)
                 .await
                 .into_iter()
