@@ -25,6 +25,7 @@ use simperby_common::crypto::*;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddrV4,
+    ops::Drop,
     sync::Arc,
     time::Duration,
 };
@@ -62,6 +63,20 @@ pub struct PropagationNetwork {
 
     /// The information of currently broadcast messages.
     broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
+}
+
+impl Drop for PropagationNetwork {
+    fn drop(&mut self) {
+        self._event_handling_task.abort();
+        self._peer_discovery_task.abort();
+        let info = Arc::clone(&self.broadcast_messages_info);
+        task::spawn(async move {
+            let info = info.lock().await;
+            for message_info in info.values() {
+                message_info.task.abort();
+            }
+        });
+    }
 }
 
 #[async_trait]
