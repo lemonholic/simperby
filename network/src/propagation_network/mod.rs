@@ -8,11 +8,10 @@ use config::PropagationNetworkConfig;
 use futures::StreamExt;
 use libp2p::{
     core::ConnectedPoint,
-    development_transport,
     identity::{ed25519, Keypair},
     multiaddr::{Multiaddr, Protocol},
-    swarm::{dial_opts::DialOpts, Swarm, SwarmEvent},
-    PeerId,
+    swarm::{dial_opts::DialOpts, Swarm, SwarmBuilder, SwarmEvent},
+    tokio_development_transport, PeerId,
 };
 use simperby_common::crypto::*;
 use std::{collections::HashSet, net::SocketAddrV4, sync::Arc, time::Duration};
@@ -141,14 +140,19 @@ impl PropagationNetwork {
 
     /// Creates a swarm with given keypair.
     async fn create_swarm(keypair: Keypair) -> Result<Swarm<Behaviour>, String> {
-        let transport = match development_transport(keypair.clone()).await {
+        let transport = match tokio_development_transport(keypair.clone()) {
             Ok(transport) => transport,
             Err(_) => return Err("failed to create a transport.".to_string()),
         };
         let behaviour = Behaviour::new(keypair.public());
         let local_peer_id = PeerId::from(keypair.public());
 
-        Ok(Swarm::new(transport, behaviour, local_peer_id))
+        let builder =
+            SwarmBuilder::new(transport, behaviour, local_peer_id).executor(Box::new(|fut| {
+                let _ = task::spawn(fut);
+            }));
+
+        Ok(builder.build())
     }
 
     /// Creates a listener for incoming connection requests.
