@@ -1,4 +1,5 @@
 pub mod memory;
+#[cfg(full)]
 pub mod rocks_db;
 #[cfg(test)]
 mod test_suite;
