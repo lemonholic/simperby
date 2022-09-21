@@ -59,7 +59,7 @@ pub struct PropagationNetwork {
     config: PropagationNetworkConfig,
 
     /// The set of known peers.
-    _known_peers: KnownPeers,
+    known_peers: KnownPeers,
 
     /// The information of currently broadcast messages.
     broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
@@ -107,14 +107,16 @@ impl AuthorizedNetwork for PropagationNetwork {
         let token = rand::random();
         let task = task::spawn(run_broadcast_task(
             Arc::clone(&self.swarm),
+            Arc::clone(&self.broadcast_messages_info),
             token,
             message.to_vec(),
             self.config.broadcast_interval,
+            self.known_peers.peers.len(),
         ));
         let info = BroadcastMessageInfo {
             _token: token,
             _message: message.to_vec(),
-            _relayed_nodes: BTreeSet::new(),
+            relayed_nodes: BTreeSet::new(),
             task,
         };
         self.broadcast_messages_info
@@ -134,11 +136,14 @@ impl AuthorizedNetwork for PropagationNetwork {
         }
     }
 
-    async fn get_broadcast_status(
-        &self,
-        _token: BroadcastToken,
-    ) -> Result<BroadcastStatus, String> {
-        unimplemented!();
+    async fn get_broadcast_status(&self, token: BroadcastToken) -> Result<BroadcastStatus, String> {
+        let info = self.broadcast_messages_info.lock().await;
+        if let Some(message_info) = info.get(&token) {
+            let relayed_nodes = message_info.relayed_nodes.iter().cloned().collect();
+            Ok(BroadcastStatus { relayed_nodes })
+        } else {
+            Err(format!("invalid token: {}", token))
+        }
     }
 
     async fn create_recv_queue(&self) -> Result<broadcast::Receiver<Vec<u8>>, ()> {
@@ -180,9 +185,12 @@ impl PropagationNetwork {
         // Create a message queue that a simperby node will use to receive messages from other nodes.
         let (sender, _receiver) = broadcast::channel::<Vec<u8>>(config.message_queue_capacity);
 
+        let broadcast_messages_info = Arc::new(Mutex::new(HashMap::new()));
+
         let _event_handling_task = task::spawn(run_event_handling_task(
             Arc::clone(&swarm_mutex),
             sender.clone(),
+            Arc::clone(&broadcast_messages_info),
             public_key,
             config.lock_release_interval,
             config.memory_queue_capacity,
@@ -199,8 +207,8 @@ impl PropagationNetwork {
             sender,
             swarm: swarm_mutex,
             config,
-            _known_peers: known_peers_set,
-            broadcast_messages_info: Arc::new(Mutex::new(HashMap::new())),
+            known_peers: known_peers_set,
+            broadcast_messages_info,
         })
     }
 
@@ -336,6 +344,7 @@ async fn run_peer_discovery_task(
 async fn run_event_handling_task(
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     sender: broadcast::Sender<Vec<u8>>,
+    broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
     pubkey: PublicKey,
     lock_release_interval: Duration,
     memory_queue_capacity: usize,
@@ -381,7 +390,7 @@ async fn run_event_handling_task(
                     if let Ok(message) = serde_json::from_slice(&data) {
                         match message {
                             NetworkMessage::Alive(pubkey) => handle_alive(pubkey),
-                            NetworkMessage::Ack(pubkey, token) => handle_ack(pubkey, token),
+                            NetworkMessage::Ack(pubkey, token) => handle_ack(broadcast_messages_info.clone(), pubkey, token).await,
                             NetworkMessage::Message(token, message) => handle_message(
                                 &mut swarm,
                                 sender.clone(),
@@ -426,43 +435,74 @@ fn handle_alive(_pubkey: PublicKey) {
     unimplemented!();
 }
 
-fn handle_ack(_pubkey: PublicKey, _token: BroadcastToken) {
-    unimplemented!();
+async fn handle_ack(
+    broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
+    pubkey: PublicKey,
+    token: BroadcastToken,
+) {
+    let mut info = broadcast_messages_info.lock().await;
+    // Discard any invalid token.
+    if let Some(message_info) = info.get_mut(&token) {
+        message_info.relayed_nodes.insert(pubkey);
+    }
 }
 
 fn handle_message(
-    _swarm: &mut Swarm<Behaviour>,
+    swarm: &mut Swarm<Behaviour>,
     sender: broadcast::Sender<Vec<u8>>,
     token_memory_queue: &mut BoundedVecDeque<(BroadcastToken, usize)>,
-    _pubkey: &PublicKey,
+    pubkey: &PublicKey,
     token: BroadcastToken,
     message: Vec<u8>,
 ) {
+    let ack = NetworkMessage::Ack(pubkey.to_owned(), token.to_owned());
+    let serialized_ack = serde_json::to_vec(&ack).unwrap_or_else(|_| {
+        panic!(
+            "unexpected crash: serialization failed: (pubkey: {}, token: {})",
+            pubkey, token
+        )
+    });
+
     match token_memory_queue
         .iter_mut()
         .find(|(token_, _)| *token_ == token)
     {
         // We received this message for the first time.
         None => {
-            // Todo: Send (broadcast) the ACK message.
+            // Send (broadcast) the ACK message.
+            swarm
+                .behaviour_mut()
+                .floodsub
+                .publish(Topic::new("simperby"), serialized_ack);
+
             let resend = 2;
             token_memory_queue.push_back((token, resend));
+
             // Put the message into the receive queue.
             // An error means there is no receiver, which is possible and acceptable. Just discard the result.
             let _ = sender.send(message);
         }
         // We've already received this message.
-        Some(_) => {
+        Some((_, resend)) => {
             // Todo: Resend(broadcast) the ACK message.
+            if *resend > 0 {
+                swarm
+                    .behaviour_mut()
+                    .floodsub
+                    .publish(Topic::new("simperby"), serialized_ack);
+                *resend -= 1;
+            }
         }
     }
 }
 
 async fn run_broadcast_task(
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
+    broadcast_messages_info: Arc<Mutex<HashMap<BroadcastToken, BroadcastMessageInfo>>>,
     token: BroadcastToken,
     message: Vec<u8>,
     broadcast_interval: Duration,
+    num_known_peers: usize,
 ) {
     let message = NetworkMessage::Message(token, message);
     let serialized = match serde_json::to_vec(&message) {
@@ -470,6 +510,11 @@ async fn run_broadcast_task(
         Err(_) => return,
     };
     loop {
+        if let Some(message_info) = broadcast_messages_info.lock().await.get(&token) {
+            if message_info.relayed_nodes.len() == num_known_peers {
+                break;
+            }
+        }
         swarm
             .lock()
             .await

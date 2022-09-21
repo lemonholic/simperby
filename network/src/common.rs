@@ -19,14 +19,14 @@ pub(crate) struct KnownPeer {
 
 /// Stores a set of known peers.
 pub(crate) struct KnownPeers {
-    peers: BTreeSet<KnownPeer>,
+    pub(crate) peers: BTreeSet<KnownPeer>,
 }
 
 /// A struct for managing broadcast message.
 pub(crate) struct BroadcastMessageInfo {
     pub(crate) _token: BroadcastToken,
     pub(crate) _message: Vec<u8>,
-    pub(crate) _relayed_nodes: BTreeSet<PublicKey>,
+    pub(crate) relayed_nodes: BTreeSet<PublicKey>,
     /// The background task that regularly broadcasts related message.
     pub(crate) task: task::JoinHandle<()>,
 }
