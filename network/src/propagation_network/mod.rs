@@ -332,12 +332,13 @@ async fn run_peer_discovery_task(
     swarm: Arc<Mutex<Swarm<Behaviour>>>,
     bootstrap_interval: Duration,
 ) {
+    let mut timer = time::interval(bootstrap_interval);
     loop {
+        let _ = timer.tick().await;
         // Note: An `Err` is returned only if there is no known peer,
         //       which is not considered to be an error if this node is
         //       the first one to join the network. Thus we discard the result.
         let _ = swarm.lock().await.behaviour_mut().kademlia.bootstrap();
-        tokio::time::sleep(bootstrap_interval).await;
     }
 }
 
@@ -509,7 +510,9 @@ async fn run_broadcast_task(
         Ok(s) => s,
         Err(_) => return,
     };
+    let mut timer = time::interval(broadcast_interval);
     loop {
+        let _ = timer.tick().await;
         if let Some(message_info) = broadcast_messages_info.lock().await.get(&token) {
             if message_info.relayed_nodes.len() == num_known_peers {
                 break;
@@ -521,7 +524,6 @@ async fn run_broadcast_task(
             .behaviour_mut()
             .floodsub
             .publish(Topic::new("simperby"), serialized.to_owned());
-        sleep(broadcast_interval).await;
     }
 }
 
