@@ -366,68 +366,71 @@ async fn run_event_handling_task(
 
     loop {
         let mut swarm = swarm.lock().await;
-        tokio::select! {
-            SwarmEvent::Behaviour(event) = swarm.select_next_some() => match event {
-                // Add the node with which we exchanged the identity to our routing table.
-                    Event::Identify(
-                        IdentifyEvent::Received {
-                            peer_id,
-                            info,
+
+        lock_release_timer.reset();
+        let event = tokio::select! {
+            e = swarm.select_next_some() => e,
+            _ = lock_release_timer.tick() => continue,
+        };
+        // Ignore any event other than `SwarmEvent::Behaviour`.
+        let event = if let SwarmEvent::Behaviour(event) = event {
+            event
+        } else {
+            // Other events might be handled in the future.
+            continue;
+        };
+
+        match event {
+            // Add the node with which we exchanged the identity to our routing table.
+            Event::Identify(IdentifyEvent::Received { peer_id, info }) => {
+                for addr in info.listen_addrs {
+                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                }
+            }
+            // Got `NetworkMessage` from a remote peer.
+            Event::Floodsub(FloodsubEvent::Message(FloodsubMessage { data, .. })) => {
+                if let Ok(message) = serde_json::from_slice(&data) {
+                    match message {
+                        NetworkMessage::Alive(pubkey) => handle_alive(pubkey),
+                        NetworkMessage::Ack(pubkey, token) => {
+                            handle_ack(broadcast_messages_info.clone(), pubkey, token).await
                         }
-                    ) => {
-                    for addr in info.listen_addrs {
-                        swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                    }
-                },
-                // Got `NetworkMessage` from a remote peer.
-                Event::Floodsub(
-                    FloodsubEvent::Message(
-                        FloodsubMessage {
-                            data,
-                            ..
-                        }
-                    )
-                ) => {
-                    if let Ok(message) = serde_json::from_slice(&data) {
-                        match message {
-                            NetworkMessage::Alive(pubkey) => handle_alive(pubkey),
-                            NetworkMessage::Ack(pubkey, token) => handle_ack(broadcast_messages_info.clone(), pubkey, token).await,
-                            NetworkMessage::Message(token, message) => handle_message(
-                                &mut swarm,
-                                sender.clone(),
-                                &mut token_memory_queue,
-                                &pubkey,
-                                token,
-                                message
-                            ),
-                        }
-                    } else {
-                        // Discard any invalid message.
-                    }
-                },
-                Event::Kademlia(
-                    KademliaEvent::OutboundQueryCompleted {
-                        result: QueryResult::Bootstrap(
-                            Ok(BootstrapOk {
-                                peer: bootstrap_target,
-                                ..
-                            })
+                        NetworkMessage::Message(token, message) => handle_message(
+                            &mut swarm,
+                            sender.clone(),
+                            &mut token_memory_queue,
+                            &pubkey,
+                            token,
+                            message,
                         ),
-                        ..
                     }
-                ) => {
-                    // k-closest peer discovery has completed.
-                    if bootstrap_target == local_peer_id {
-                        let behaviour = swarm.behaviour_mut();
-                        for key in behaviour.kademlia.get_closest_local_peers(&local_peer_id.into()) {
-                            let peer_id = key.preimage();
-                            behaviour.floodsub.add_node_to_partial_view(peer_id.to_owned());
-                        }
+                } else {
+                    // Discard any invalid message.
+                }
+            }
+            Event::Kademlia(KademliaEvent::OutboundQueryCompleted {
+                result:
+                    QueryResult::Bootstrap(Ok(BootstrapOk {
+                        peer: bootstrap_target,
+                        ..
+                    })),
+                ..
+            }) => {
+                // k-closest peer discovery has completed.
+                if bootstrap_target == local_peer_id {
+                    let behaviour = swarm.behaviour_mut();
+                    for key in behaviour
+                        .kademlia
+                        .get_closest_local_peers(&local_peer_id.into())
+                    {
+                        let peer_id = key.preimage();
+                        behaviour
+                            .floodsub
+                            .add_node_to_partial_view(peer_id.to_owned());
                     }
                 }
-                _ => (),
-            },
-            _ = lock_release_timer.tick() => (),
+            }
+            _ => (),
         }
     }
 }
