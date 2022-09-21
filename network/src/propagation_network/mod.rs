@@ -783,6 +783,13 @@ mod test {
                 let listen_address = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port);
                 listen_addresses.push(listen_address);
             }
+            // Append addresses of already joined nodes.
+            for key in self.get_nodes_in_network().iter() {
+                let network = self.nodes.get(key).unwrap().network.as_ref().unwrap();
+                for address in network.get_listen_addresses().await {
+                    listen_addresses.push(address);
+                }
+            }
 
             // Create the network interfaces asynchronously.
             let nodes: Vec<&Node> = target_nodes
